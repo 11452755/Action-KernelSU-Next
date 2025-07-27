@@ -2,7 +2,7 @@ name: Build Kernel with SUSFS for Android 13
 on:
   workflow_dispatch:
     inputs:
-      CPU: {默认: 'lineage-20', description: '分支 (Android 13)'}
+      CPU: {default: 'lineage-20', description: '分支 (Android 13)'}
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -16,23 +16,30 @@ jobs:
           git config --global user.name "build"
           git config --global user.email "3436378798@qq.com"
           git config --global http.postBuffer 524288000
-          # 使用正确的镜像代理
-          git config --global url."https://ghproxy.com/https://github.com".insteadOf "https://github.com"
 
       - name: Install dependencies
         run: |
           sudo apt update
-          sudo apt install -y python3 git curl flex bison libssl-dev bc
+          sudo apt install -y python3 git curl flex bison libssl-dev bc unzip
           sudo apt install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
 
       - name: Initialize repo and sync
         run: |
           mkdir kernel_workspace && cd kernel_workspace
           
-          # 使用直接下载链接（绕过Git）
-          curl -LO https://github.com/LineageOS/android_kernel_xiaomi_sm7475/archive/refs/heads/${{ inputs.CPU }}.zip
-          unzip ${{ inputs.CPU }}.zip
-          mv android_kernel_xiaomi_sm7475-${{ inputs.CPU }} Xiaomi_Kernel_OpenSource
+          # 使用可靠的下载源
+          echo "下载内核源码..."
+          curl -L -o kernel_source.zip "https://sourceforge.net/projects/lineageos-sm7475/files/android_kernel_xiaomi_sm7475-lineage-20.zip/download"
+          
+          # 验证文件完整性
+          if [ $(stat -c%s "kernel_source.zip") -lt 1000000 ]; then
+            echo "文件大小异常，尝试备用源..."
+            curl -L -o kernel_source.zip "https://github.com/LineageOS/android_kernel_xiaomi_sm7475/archive/refs/heads/lineage-20.zip"
+          fi
+          
+          # 解压内核源码
+          unzip kernel_source.zip
+          mv android_kernel_xiaomi_sm7475-lineage-20 Xiaomi_Kernel_OpenSource
           
           cd Xiaomi_Kernel_OpenSource
           sed -i 's/ -dirty//g' scripts/setlocalversion
@@ -40,17 +47,18 @@ jobs:
       - name: Set up susfs
         run: |
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
-          
-          # 创建sufs目录
           mkdir -p fs/sufs
           
-          # 下载预编译的sufs
-          curl -L https://cdn.jsdelivr.net/gh/tiann/sufs@main/bin/arm64/sufs -o fs/sufs/sufs
+          # 下载可靠的sufs二进制
+          curl -L -o fs/sufs/sufs "https://github.com/tiann/sufs/releases/download/v1.5.0/sufs-arm64-android13"
           chmod +x fs/sufs/sufs
           
           # 创建必要的Kconfig文件
-          echo "config SUSFS" > fs/sufs/Kconfig
-          echo "    bool \"SUSFS support\"" >> fs/sufs/Kconfig
+          cat > fs/sufs/Kconfig <<EOF
+          config SUSFS
+              bool "SUSFS support"
+              default y
+          EOF
 
       - name: Fix Kconfig references
         run: |
@@ -68,38 +76,54 @@ jobs:
         run: |
           cd kernel_workspace
           
-          # 下载AnyKernel3
-          curl -LO https://github.com/Kernel-SU/AnyKernel3/archive/refs/heads/master.zip
-          unzip master.zip
-          mv AnyKernel3-master AnyKernel3
+          # 手动创建AnyKernel3结构
+          mkdir -p AnyKernel3/{META-INF/com/google/android,ramdisk/sbin}
+          
+          # 基本刷机脚本
+          cat > AnyKernel3/META-INF/com/google/android/update-binary <<EOF
+          #!/sbin/sh
+          ui_print "刷入 SUSFS 内核..."
+          /tmp/busybox unzip -o "\$3" -d /tmp/anykernel
+          cd /tmp/anykernel
+          . ./anykernel.sh
+          EOF
+          
+          # 内核安装脚本
+          cat > AnyKernel3/anykernel.sh <<EOF
+          #!/sbin/sh
+          kernel=/tmp/anykernel/Image
+          ramdisk=/tmp/anykernel/ramdisk
+          
+          ui_print "安装内核..."
+          dd if=\$kernel of=/dev/block/bootdevice/by-name/boot
+          
+          ui_print "安装 SUSFS..."
+          cp -r \$ramdisk/* /
+          chmod 0755 /sbin/sufs
+          
+          ui_print "完成！"
+          EOF
+          
+          chmod +x AnyKernel3/META-INF/com/google/android/update-binary
+          chmod +x AnyKernel3/anykernel.sh
           
           # 复制内核镜像
           cp Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image ./AnyKernel3/
           
           # 添加sufs
-          mkdir -p ./AnyKernel3/ramdisk/sbin
           cp Xiaomi_Kernel_OpenSource/fs/sufs/sufs ./AnyKernel3/ramdisk/sbin/
           chmod 755 ./AnyKernel3/ramdisk/sbin/sufs
           
           # 启动脚本
-          cat << EOF > ./AnyKernel3/ramdisk/init.sufs.rc
+          cat > ./AnyKernel3/ramdisk/init.sufs.rc <<EOF
           service sufs-daemon /sbin/sufs --mount
               class main
               user root
               group root
               oneshot
           EOF
-          echo 'import /init.sufs.rc' >> ./AnyKernel3/ramdisk/init.rc
           
-          # 权限设置
-          echo 'set_perm_recursive 0 0 0755 0755 "/sbin";' >> ./AnyKernel3/anykernel.sh
-          echo 'set_perm 0 0 0755 "/sbin/sufs";' >> ./AnyKernel3/anykernel.sh
-          
-          # 添加设备兼容性
-          sed -i '/device\.name1=/a device.name1=marble' ./AnyKernel3/anykernel.sh
-          sed -i '/device\.name2=/a device.name2=marblein' ./AnyKernel3/anykernel.sh
-          
-          # 打包
+          # 打包ZIP
           cd AnyKernel3
           zip -r9 ../AnyKernel3_SUSFS_marble_android13.zip .
 
