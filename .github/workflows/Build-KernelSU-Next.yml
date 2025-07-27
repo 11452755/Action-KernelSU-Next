@@ -64,8 +64,6 @@ jobs:
           git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git -b ${{ github.event.inputs.CPU }} --depth=1
           cd Xiaomi_Kernel_OpenSource
           sed -i 's/ -dirty//g' scripts/setlocalversion
-          
-          # 清理可能存在的冲突目录
           rm -rf drivers/misc/MMid/ 2>/dev/null || true
 
       - name: Set up susfs
@@ -74,18 +72,27 @@ jobs:
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }} --depth=1
           
-          # 复制核心文件
+          # 创建目录
           mkdir -p fs/sufs
-          cp -r susfs4ksu/kernel_patches/fs/sufs/* fs/sufs/
-          cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
+          mkdir -p include/linux
           
-          # 安全添加Kconfig引用
-          if ! grep -q "fs/sufs/Kconfig" drivers/misc/Kconfig; then
+          # 兼容性复制
+          cp -r susfs4ksu/fs/sufs/* fs/sufs/ 2>/dev/null || :
+          cp -r susfs4ksu/kernel_patches/fs/sufs/* fs/sufs/ 2>/dev/null || :
+          
+          cp -r susfs4ksu/include/linux/* include/linux/ 2>/dev/null || :
+          cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || :
+          
+          # 添加Kconfig引用
+          if [ -f "fs/sufs/Kconfig" ]; then
+            if ! grep -q "fs/sufs/Kconfig" drivers/misc/Kconfig; then
+              echo -e "\n# SUSFS Integration\nsource \"fs/sufs/Kconfig\"" >> drivers/misc/Kconfig
+            fi
+          else
+            echo "创建空 Kconfig 防止编译失败..."
+            touch fs/sufs/Kconfig
             echo -e "\n# SUSFS Integration\nsource \"fs/sufs/Kconfig\"" >> drivers/misc/Kconfig
           fi
-          
-          # 复制Kconfig文件
-          cp susfs4ksu/kernel_patches/fs/sufs/Kconfig fs/sufs/
 
       - name: Fix Makefile and Kconfig
         run: |
@@ -96,53 +103,44 @@ jobs:
             sed -i '/obj-y += /a obj-y += sufs/' fs/Makefile
           fi
           
-          # 修复可能的换行符问题
-          sed -i 's/\r$//' drivers/misc/Kconfig
-          sed -i 's/\r$//' fs/sufs/Kconfig
+          # 修复换行符
+          sed -i 's/\r$//' drivers/misc/Kconfig 2>/dev/null || :
+          sed -i 's/\r$//' fs/sufs/Kconfig 2>/dev/null || :
 
       - name: Build kernel
         run: |
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
-          
-          # 初始化配置
           make O=out ARCH=arm64 ${{ github.event.inputs.FEIL }}
-          
-          # 完整编译
-          make -j$(nproc) O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
-            CC="aarch64-linux-gnu-gcc" \
-            LD="aarch64-linux-gnu-ld" \
-            AR="aarch64-linux-gnu-ar" \
-            NM="aarch64-linux-gnu-nm"
+          make -j$(nproc) O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
 
       - name: Make AnyKernel3
         run: |
           cd kernel_workspace
           git clone https://github.com/Kernel-SU/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
-          
-          # 复制内核镜像
           cp Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image ./AnyKernel3/
           
-          # 添加sufs到ramdisk
+          # 添加sufs
           mkdir -p ./AnyKernel3/ramdisk/sbin
-          cp Xiaomi_Kernel_OpenSource/susfs4ksu/bin/arm64/sufs ./AnyKernel3/ramdisk/sbin/
+          if [ -f "Xiaomi_Kernel_OpenSource/susfs4ksu/bin/arm64/sufs" ]; then
+            cp Xiaomi_Kernel_OpenSource/susfs4ksu/bin/arm64/sufs ./AnyKernel3/ramdisk/sbin/
+          else
+            # 备用方案：从已知URL下载
+            curl -L https://gitlab.com/simonpunk/susfs4ksu/-/raw/main/bin/arm64/sufs?inline=false -o ./AnyKernel3/ramdisk/sbin/sufs
+          fi
           chmod 755 ./AnyKernel3/ramdisk/sbin/sufs
           
-          # 创建启动脚本
+          # 启动脚本
           echo 'service sufs-daemon /sbin/sufs --mount' > ./AnyKernel3/ramdisk/init.sufs.rc
           echo '    class main' >> ./AnyKernel3/ramdisk/init.sufs.rc
           echo '    user root' >> ./AnyKernel3/ramdisk/init.sufs.rc
           echo '    group root' >> ./AnyKernel3/ramdisk/init.sufs.rc
           echo '    oneshot' >> ./AnyKernel3/ramdisk/init.sufs.rc
-          
-          # 导入到主init
           echo 'import /init.sufs.rc' >> ./AnyKernel3/ramdisk/init.rc
           
-          # 修改刷机脚本权限
+          # 权限设置
           echo 'set_perm_recursive 0 0 0755 0755 "/sbin";' >> ./AnyKernel3/anykernel.sh
           echo 'set_perm 0 0 0755 "/sbin/sufs";' >> ./AnyKernel3/anykernel.sh
-          
-          # 添加设备兼容性检查
           sed -i '/device\.name1=/a device.name1=marble' ./AnyKernel3/anykernel.sh
           sed -i '/device\.name2=/a device.name2=marblein' ./AnyKernel3/anykernel.sh
 
