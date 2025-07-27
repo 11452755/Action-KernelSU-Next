@@ -3,10 +3,8 @@ on:
   workflow_dispatch:
     inputs:
       CPU: {默认: 'lineage-20', description: '分支 (Android 13)'}
-      FEIL: {默认: 'vendor/waipio_QGKI.config', description: '配置文件'}
+      FEIL: {默认: 'marble_defconfig', description: '配置文件'}
       CPUD: {默认: 'sm7475', description: '处理器代号'}
-      ANDROID_VERSION: {默认: 'android13', description: '内核安卓版本'}
-      KERNEL_VERSION: {默认: '5.10', description: '内核版本'}
       SUSFS_ENABLED: {默认: true, description: '添加 SUSFS', type: boolean}
 jobs:
   build:
@@ -21,6 +19,7 @@ jobs:
           git config --global user.name "build"
           git config --global user.email "3436378798@qq.com"
           git config --global http.postBuffer 524288000
+          git config --global url."https://ghproxy.com/https://github.com".insteadOf "https://github.com"
 
       - name: Install dependencies
         run: |
@@ -32,8 +31,8 @@ jobs:
         run: |
           mkdir kernel_workspace && cd kernel_workspace
           
-          # 使用 LineageOS 官方仓库 (Android 13)
-          git clone https://github.com/LineageOS/android_kernel_xiaomi_sm7475.git -b ${{ inputs.CPU }} --depth=1
+          # 使用镜像源克隆
+          git clone https://ghproxy.com/https://github.com/LineageOS/android_kernel_xiaomi_sm7475.git -b ${{ inputs.CPU }} --depth=1
           mv android_kernel_xiaomi_sm7475 Xiaomi_Kernel_OpenSource
           
           cd Xiaomi_Kernel_OpenSource
@@ -44,40 +43,35 @@ jobs:
         run: |
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
           
-          # 下载预编译的 sufs (Android 13专用)
+          # 使用镜像源下载 sufs
+          curl -L https://ghproxy.com/https://gitlab.com/simonpunk/susfs4ksu/-/raw/android12-5.10/bin/arm64/sufs -o sufs_binary
           mkdir -p fs/sufs
-          curl -L https://gitlab.com/simonpunk/susfs4ksu/-/raw/android12-5.10/bin/arm64/sufs -o fs/sufs/sufs
+          mv sufs_binary fs/sufs/sufs
           chmod +x fs/sufs/sufs
-          
-          # 创建必要的Kconfig文件
           touch fs/sufs/Kconfig
 
       - name: Fix Kconfig references
         run: |
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
-          # 添加SUSFS引用
           echo -e "\n# SUSFS Integration\nsource \"fs/sufs/Kconfig\"" >> drivers/misc/Kconfig
-          # 添加Makefile条目
           echo "obj-y += sufs/" >> fs/Makefile
 
       - name: Build kernel
         run: |
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
-          # 使用正确的配置文件
-          cp arch/arm64/configs/${{ inputs.FEIL }} .config
-          # 生成完整配置
-          make O=out ARCH=arm64 oldconfig
-          # 编译内核
+          # 使用更兼容的配置文件
+          make O=out ARCH=arm64 marble_defconfig
           make -j$(nproc) O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
 
       - name: Make AnyKernel3
         run: |
           cd kernel_workspace
-          git clone https://github.com/Kernel-SU/AnyKernel3 --depth=1
+          # 使用镜像源克隆 AnyKernel3
+          git clone https://ghproxy.com/https://github.com/Kernel-SU/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
           
           # 复制内核镜像
-          cp Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image.gz ./AnyKernel3/Image.gz
+          cp Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image ./AnyKernel3/
           
           # 添加 sufs 到 ramdisk
           mkdir -p ./AnyKernel3/ramdisk/sbin
@@ -92,7 +86,6 @@ jobs:
               group root
               oneshot
           EOF
-          # 导入到主init
           echo 'import /init.sufs.rc' >> ./AnyKernel3/ramdisk/init.rc
           
           # 添加权限设置
