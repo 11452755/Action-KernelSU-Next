@@ -1,37 +1,32 @@
-name: Build KernelSU Next
+name: Build Kernel with SUSFS
 on:
   workflow_dispatch:
     inputs:
       CPU:
         description: "分支"
         required: true
-        default: 'marble-s-oss'  # 红米专用分支
+        default: 'marble-s-oss'
       FEIL:
         description: "配置文件"
         required: true
-        default: 'marble_defconfig'  # 设备配置
+        default: 'marble_defconfig'
       CPUD:
         description: "处理器代号"
         required: true
-        default: 'sm7475'  # 骁龙7+ Gen2
+        default: 'sm7475'
       ANDROID_VERSION:
         description: "内核安卓版本"
         required: true
-        default: 'android12'  # 匹配设备
+        default: 'android12'
       KERNEL_VERSION:
         description: "内核版本"
         required: true
-        default: '5.10'  # 主版本号
-      KSUNEXT_ENABLED:
-        description: "添加 KSU Next"
-        required: true
-        type: boolean
-        default: false  # 关闭KSU
+        default: '5.10'
       SUSFS_ENABLED:
         description: "添加 SUSFS"
         required: true
         type: boolean
-        default: true  # 启用SUSFS
+        default: true
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -55,7 +50,7 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt update && sudo apt upgrade -y
-          sudo apt install -y python3 git curl gcc-aarch64-linux-gnu g++-aarch64-linux-gnu flex bison libssl-dev
+          sudo apt install -y python3 git curl gcc-aarch64-linux-gnu g++-aarch64-linux-gnu flex bison libssl-dev bc
 
       - name: Install repo tool
         run: |
@@ -69,32 +64,63 @@ jobs:
           git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git -b ${{ github.event.inputs.CPU }} --depth=1
           cd Xiaomi_Kernel_OpenSource
           sed -i 's/ -dirty//g' scripts/setlocalversion
+          
+          # 清理可能存在的冲突目录
+          rm -rf drivers/misc/MMid/ 2>/dev/null || true
 
       - name: Set up susfs
         if: github.event.inputs.SUSFS_ENABLED == 'true'
         run: |
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }} --depth=1
           
-          # 应用补丁
-          cp susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch ./
-          patch -p1 < 50_add_susfs_in_gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }}.patch || true
-          
-          # 复制必要文件
-          cp -r susfs4ksu/kernel_patches/fs/* fs/
+          # 复制核心文件
+          mkdir -p fs/sufs
+          cp -r susfs4ksu/kernel_patches/fs/sufs/* fs/sufs/
           cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/
+          
+          # 安全添加Kconfig引用
+          if ! grep -q "fs/sufs/Kconfig" drivers/misc/Kconfig; then
+            echo -e "\n# SUSFS Integration\nsource \"fs/sufs/Kconfig\"" >> drivers/misc/Kconfig
+          fi
+          
+          # 复制Kconfig文件
+          cp susfs4ksu/kernel_patches/fs/sufs/Kconfig fs/sufs/
+
+      - name: Fix Makefile and Kconfig
+        run: |
+          cd kernel_workspace/Xiaomi_Kernel_OpenSource
+          
+          # 确保sufs目录被编译
+          if ! grep -q "obj-y += sufs" fs/Makefile; then
+            sed -i '/obj-y += /a obj-y += sufs/' fs/Makefile
+          fi
+          
+          # 修复可能的换行符问题
+          sed -i 's/\r$//' drivers/misc/Kconfig
+          sed -i 's/\r$//' fs/sufs/Kconfig
 
       - name: Build kernel
         run: |
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
+          
+          # 初始化配置
           make O=out ARCH=arm64 ${{ github.event.inputs.FEIL }}
-          make -j$(nproc) O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
+          
+          # 完整编译
+          make -j$(nproc) O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
+            CC="aarch64-linux-gnu-gcc" \
+            LD="aarch64-linux-gnu-ld" \
+            AR="aarch64-linux-gnu-ar" \
+            NM="aarch64-linux-gnu-nm"
 
       - name: Make AnyKernel3
         run: |
           cd kernel_workspace
           git clone https://github.com/Kernel-SU/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
+          
+          # 复制内核镜像
           cp Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image ./AnyKernel3/
           
           # 添加sufs到ramdisk
@@ -108,14 +134,20 @@ jobs:
           echo '    user root' >> ./AnyKernel3/ramdisk/init.sufs.rc
           echo '    group root' >> ./AnyKernel3/ramdisk/init.sufs.rc
           echo '    oneshot' >> ./AnyKernel3/ramdisk/init.sufs.rc
+          
+          # 导入到主init
           echo 'import /init.sufs.rc' >> ./AnyKernel3/ramdisk/init.rc
           
           # 修改刷机脚本权限
           echo 'set_perm_recursive 0 0 0755 0755 "/sbin";' >> ./AnyKernel3/anykernel.sh
           echo 'set_perm 0 0 0755 "/sbin/sufs";' >> ./AnyKernel3/anykernel.sh
+          
+          # 添加设备兼容性检查
+          sed -i '/device\.name1=/a device.name1=marble' ./AnyKernel3/anykernel.sh
+          sed -i '/device\.name2=/a device.name2=marblein' ./AnyKernel3/anykernel.sh
 
       - name: Upload AnyKernel3
         uses: actions/upload-artifact@v4
         with:
-          name: AnyKernel3_SUSFS_${{ github.event.inputs.FEIL }}
+          name: AnyKernel3_SUSFS_marble
           path: ./kernel_workspace/AnyKernel3/*
