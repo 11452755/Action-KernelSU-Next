@@ -2,10 +2,10 @@ name: Build Kernel with SUSFS
 on:
   workflow_dispatch:
     inputs:
-      CPU: {default: 'marble-s-oss', description: '分支'}
-      FEIL: {default: 'marble_defconfig', description: '配置文件'}
+      CPU: {default: '13.0', description: '分支'}
+      FEIL: {default: 'vendor/waipio_QGKI.config', description: '配置文件'}
       CPUD: {default: 'sm7475', description: '处理器代号'}
-      ANDROID_VERSION: {default: 'android12', description: '内核安卓版本'}
+      ANDROID_VERSION: {default: 'android13', description: '内核安卓版本'}
       KERNEL_VERSION: {default: '5.10', description: '内核版本'}
       SUSFS_ENABLED: {default: true, description: '添加 SUSFS', type: boolean}
 jobs:
@@ -35,14 +35,12 @@ jobs:
       - name: Initialize repo and sync
         run: |
           mkdir kernel_workspace && cd kernel_workspace
-          git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git -b ${{ inputs.CPU }} --depth=1
+          
+          # 使用第三方纯净源码（已适配红米Note12 Turbo）
+          git clone https://github.com/crdroidandroid/android_kernel_xiaomi_sm7475.git -b 13.0 --depth=1
+          mv android_kernel_xiaomi_sm7475 Xiaomi_Kernel_OpenSource
+          
           cd Xiaomi_Kernel_OpenSource
-          
-          # 直接修复问题文件
-          sed -i '/Mwid/d' drivers/misc/Kconfig
-          
-          # 清理残留
-          rm -rf drivers/misc/MMid/ drivers/misc/Mwid/ 2>/dev/null || true
           sed -i 's/ -dirty//g' scripts/setlocalversion
 
       - name: Set up susfs
@@ -51,7 +49,7 @@ jobs:
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ inputs.ANDROID_VERSION }}-${{ inputs.KERNEL_VERSION }} --depth=1
           
-          # 创建SUSFS目录结构
+          # 创建目录结构
           mkdir -p fs/sufs
           mkdir -p include/linux
           
@@ -79,7 +77,11 @@ jobs:
       - name: Build kernel
         run: |
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
-          make O=out ARCH=arm64 ${{ inputs.FEIL }}
+          
+          # 使用正确的配置文件
+          cp arch/arm64/configs/${{ inputs.FEIL }} .config
+          
+          make O=out ARCH=arm64 oldconfig
           make -j$(nproc) O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
 
       - name: Make AnyKernel3
@@ -87,7 +89,7 @@ jobs:
           cd kernel_workspace
           git clone https://github.com/Kernel-SU/AnyKernel3 --depth=1
           rm -rf ./AnyKernel3/.git
-          cp Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image ./AnyKernel3/
+          cp Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image.gz ./AnyKernel3/Image.gz
           
           # 添加sufs二进制
           mkdir -p ./AnyKernel3/ramdisk/sbin
