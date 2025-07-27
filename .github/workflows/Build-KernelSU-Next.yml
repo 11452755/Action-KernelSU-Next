@@ -38,9 +38,10 @@ jobs:
           git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git -b ${{ inputs.CPU }} --depth=1
           cd Xiaomi_Kernel_OpenSource
           
-          # 彻底清除 OnePlus 残留
-          find . -name "Kconfig" -exec sed -i '/MMid/d' {} \;
-          find . -name "Kconfig" -exec sed -i '/Mwid/d' {} \;
+          # 直接修复问题文件
+          sed -i '/Mwid/d' drivers/misc/Kconfig
+          
+          # 清理残留
           rm -rf drivers/misc/MMid/ drivers/misc/Mwid/ 2>/dev/null || true
           sed -i 's/ -dirty//g' scripts/setlocalversion
 
@@ -50,30 +51,29 @@ jobs:
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
           git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ inputs.ANDROID_VERSION }}-${{ inputs.KERNEL_VERSION }} --depth=1
           
-          mkdir -p fs/sufs include/linux
-          cp -r susfs4ksu/fs/sufs/* fs/sufs/ 2>/dev/null || :
-          cp -r susfs4ksu/include/linux/* include/linux/ 2>/dev/null || :
+          # 创建SUSFS目录结构
+          mkdir -p fs/sufs
+          mkdir -p include/linux
           
-          if [ ! -f "fs/sufs/Kconfig" ]; then
-            touch fs/sufs/Kconfig
-          fi
+          # 复制文件
+          cp susfs4ksu/fs/sufs/* fs/sufs/ 2>/dev/null || :
+          cp susfs4ksu/include/linux/* include/linux/ 2>/dev/null || :
+          
+          # 确保Kconfig存在
+          touch fs/sufs/Kconfig
 
-      - name: Fix Makefile and Kconfig
+      - name: Fix Kconfig references
         run: |
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
           
-          # 最终清理
-          sed -i '/source.*MMid/d' drivers/misc/Kconfig
-          sed -i '/source.*Mwid/d' drivers/misc/Kconfig
-          
-          # 确保SUSFS引用存在
+          # 添加SUSFS引用
           if ! grep -q "fs/sufs/Kconfig" drivers/misc/Kconfig; then
             echo -e "\n# SUSFS Integration\nsource \"fs/sufs/Kconfig\"" >> drivers/misc/Kconfig
           fi
           
-          # Makefile修复
+          # 确保Makefile包含sufs
           if ! grep -q "obj-y += sufs" fs/Makefile; then
-            sed -i '/obj-y += /a obj-y += sufs/' fs/Makefile
+            echo "obj-y += sufs/" >> fs/Makefile
           fi
 
       - name: Build kernel
@@ -89,16 +89,12 @@ jobs:
           rm -rf ./AnyKernel3/.git
           cp Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image ./AnyKernel3/
           
-          # 添加sufs
+          # 添加sufs二进制
           mkdir -p ./AnyKernel3/ramdisk/sbin
-          if [ -f "Xiaomi_Kernel_OpenSource/susfs4ksu/bin/arm64/sufs" ]; then
-            cp Xiaomi_Kernel_OpenSource/susfs4ksu/bin/arm64/sufs ./AnyKernel3/ramdisk/sbin/
-          else
-            curl -L https://gitlab.com/simonpunk/susfs4ksu/-/raw/main/bin/arm64/sufs -o ./AnyKernel3/ramdisk/sbin/sufs
-          fi
+          curl -L https://gitlab.com/simonpunk/susfs4ksu/-/raw/main/bin/arm64/sufs -o ./AnyKernel3/ramdisk/sbin/sufs
           chmod 755 ./AnyKernel3/ramdisk/sbin/sufs
           
-          # 启动脚本
+          # 创建启动脚本
           cat << EOF > ./AnyKernel3/ramdisk/init.sufs.rc
           service sufs-daemon /sbin/sufs --mount
               class main
@@ -108,9 +104,11 @@ jobs:
           EOF
           echo 'import /init.sufs.rc' >> ./AnyKernel3/ramdisk/init.rc
           
-          # 权限设置
+          # 添加权限设置
           echo 'set_perm_recursive 0 0 0755 0755 "/sbin";' >> ./AnyKernel3/anykernel.sh
           echo 'set_perm 0 0 0755 "/sbin/sufs";' >> ./AnyKernel3/anykernel.sh
+          
+          # 添加设备兼容性
           sed -i '/device\.name1=/a device.name1=marble' ./AnyKernel3/anykernel.sh
           sed -i '/device\.name2=/a device.name2=marblein' ./AnyKernel3/anykernel.sh
 
