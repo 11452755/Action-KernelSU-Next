@@ -2,46 +2,20 @@ name: Build Kernel with SUSFS
 on:
   workflow_dispatch:
     inputs:
-      CPU:
-        description: "分支"
-        required: true
-        default: 'marble-s-oss'
-      FEIL:
-        description: "配置文件"
-        required: true
-        default: 'marble_defconfig'
-      CPUD:
-        description: "处理器代号"
-        required: true
-        default: 'sm7475'
-      ANDROID_VERSION:
-        description: "内核安卓版本"
-        required: true
-        default: 'android12'
-      KERNEL_VERSION:
-        description: "内核版本"
-        required: true
-        default: '5.10'
-      SUSFS_ENABLED:
-        description: "添加 SUSFS"
-        required: true
-        type: boolean
-        default: true
+      CPU: {default: 'marble-s-oss', description: '分支'}
+      FEIL: {default: 'marble_defconfig', description: '配置文件'}
+      CPUD: {default: 'sm7475', description: '处理器代号'}
+      ANDROID_VERSION: {default: 'android12', description: '内核安卓版本'}
+      KERNEL_VERSION: {default: '5.10', description: '内核版本'}
+      SUSFS_ENABLED: {default: true, description: '添加 SUSFS', type: boolean}
 jobs:
   build:
     runs-on: ubuntu-latest
-    
     steps:
       - name: Maximize build space
         uses: easimon/maximize-build-space@master
-        with:
-          root-reserve-mb: 8192
-          temp-reserve-mb: 2048
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
-          remove-codeql: 'true'
-          
+        with: {root-reserve-mb: 8192, temp-reserve-mb: 2048, remove-dotnet: 'true', remove-android: 'true', remove-haskell: 'true', remove-codeql: 'true'}
+      
       - name: Configure Git
         run: |
           git config --global user.name "build"
@@ -61,56 +35,51 @@ jobs:
       - name: Initialize repo and sync
         run: |
           mkdir kernel_workspace && cd kernel_workspace
-          git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git -b ${{ github.event.inputs.CPU }} --depth=1
+          git clone https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git -b ${{ inputs.CPU }} --depth=1
           cd Xiaomi_Kernel_OpenSource
+          
+          # 彻底清除 OnePlus 残留
+          find . -name "Kconfig" -exec sed -i '/MMid/d' {} \;
+          find . -name "Kconfig" -exec sed -i '/Mwid/d' {} \;
+          rm -rf drivers/misc/MMid/ drivers/misc/Mwid/ 2>/dev/null || true
           sed -i 's/ -dirty//g' scripts/setlocalversion
-          rm -rf drivers/misc/MMid/ 2>/dev/null || true
 
       - name: Set up susfs
-        if: github.event.inputs.SUSFS_ENABLED == 'true'
+        if: ${{ inputs.SUSFS_ENABLED == 'true' }}
         run: |
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
-          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ github.event.inputs.ANDROID_VERSION }}-${{ github.event.inputs.KERNEL_VERSION }} --depth=1
+          git clone https://gitlab.com/simonpunk/susfs4ksu.git -b gki-${{ inputs.ANDROID_VERSION }}-${{ inputs.KERNEL_VERSION }} --depth=1
           
-          # 创建目录
-          mkdir -p fs/sufs
-          mkdir -p include/linux
-          
-          # 兼容性复制
+          mkdir -p fs/sufs include/linux
           cp -r susfs4ksu/fs/sufs/* fs/sufs/ 2>/dev/null || :
-          cp -r susfs4ksu/kernel_patches/fs/sufs/* fs/sufs/ 2>/dev/null || :
-          
           cp -r susfs4ksu/include/linux/* include/linux/ 2>/dev/null || :
-          cp -r susfs4ksu/kernel_patches/include/linux/* include/linux/ 2>/dev/null || :
           
-          # 添加Kconfig引用
-          if [ -f "fs/sufs/Kconfig" ]; then
-            if ! grep -q "fs/sufs/Kconfig" drivers/misc/Kconfig; then
-              echo -e "\n# SUSFS Integration\nsource \"fs/sufs/Kconfig\"" >> drivers/misc/Kconfig
-            fi
-          else
-            echo "创建空 Kconfig 防止编译失败..."
+          if [ ! -f "fs/sufs/Kconfig" ]; then
             touch fs/sufs/Kconfig
-            echo -e "\n# SUSFS Integration\nsource \"fs/sufs/Kconfig\"" >> drivers/misc/Kconfig
           fi
 
       - name: Fix Makefile and Kconfig
         run: |
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
           
-          # 确保sufs目录被编译
+          # 最终清理
+          sed -i '/source.*MMid/d' drivers/misc/Kconfig
+          sed -i '/source.*Mwid/d' drivers/misc/Kconfig
+          
+          # 确保SUSFS引用存在
+          if ! grep -q "fs/sufs/Kconfig" drivers/misc/Kconfig; then
+            echo -e "\n# SUSFS Integration\nsource \"fs/sufs/Kconfig\"" >> drivers/misc/Kconfig
+          fi
+          
+          # Makefile修复
           if ! grep -q "obj-y += sufs" fs/Makefile; then
             sed -i '/obj-y += /a obj-y += sufs/' fs/Makefile
           fi
-          
-          # 修复换行符
-          sed -i 's/\r$//' drivers/misc/Kconfig 2>/dev/null || :
-          sed -i 's/\r$//' fs/sufs/Kconfig 2>/dev/null || :
 
       - name: Build kernel
         run: |
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
-          make O=out ARCH=arm64 ${{ github.event.inputs.FEIL }}
+          make O=out ARCH=arm64 ${{ inputs.FEIL }}
           make -j$(nproc) O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
 
       - name: Make AnyKernel3
@@ -125,17 +94,18 @@ jobs:
           if [ -f "Xiaomi_Kernel_OpenSource/susfs4ksu/bin/arm64/sufs" ]; then
             cp Xiaomi_Kernel_OpenSource/susfs4ksu/bin/arm64/sufs ./AnyKernel3/ramdisk/sbin/
           else
-            # 备用方案：从已知URL下载
-            curl -L https://gitlab.com/simonpunk/susfs4ksu/-/raw/main/bin/arm64/sufs?inline=false -o ./AnyKernel3/ramdisk/sbin/sufs
+            curl -L https://gitlab.com/simonpunk/susfs4ksu/-/raw/main/bin/arm64/sufs -o ./AnyKernel3/ramdisk/sbin/sufs
           fi
           chmod 755 ./AnyKernel3/ramdisk/sbin/sufs
           
           # 启动脚本
-          echo 'service sufs-daemon /sbin/sufs --mount' > ./AnyKernel3/ramdisk/init.sufs.rc
-          echo '    class main' >> ./AnyKernel3/ramdisk/init.sufs.rc
-          echo '    user root' >> ./AnyKernel3/ramdisk/init.sufs.rc
-          echo '    group root' >> ./AnyKernel3/ramdisk/init.sufs.rc
-          echo '    oneshot' >> ./AnyKernel3/ramdisk/init.sufs.rc
+          cat << EOF > ./AnyKernel3/ramdisk/init.sufs.rc
+          service sufs-daemon /sbin/sufs --mount
+              class main
+              user root
+              group root
+              oneshot
+          EOF
           echo 'import /init.sufs.rc' >> ./AnyKernel3/ramdisk/init.rc
           
           # 权限设置
