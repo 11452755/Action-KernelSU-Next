@@ -3,9 +3,6 @@ on:
   workflow_dispatch:
     inputs:
       CPU: {默认: 'lineage-20', description: '分支 (Android 13)'}
-      FEIL: {默认: 'marble_defconfig', description: '配置文件'}
-      CPUD: {默认: 'sm7475', description: '处理器代号'}
-      SUSFS_ENABLED: {默认: true, description: '添加 SUSFS', type: boolean}
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -19,6 +16,7 @@ jobs:
           git config --global user.name "build"
           git config --global user.email "3436378798@qq.com"
           git config --global http.postBuffer 524288000
+          # 使用正确的镜像代理
           git config --global url."https://ghproxy.com/https://github.com".insteadOf "https://github.com"
 
       - name: Install dependencies
@@ -31,24 +29,28 @@ jobs:
         run: |
           mkdir kernel_workspace && cd kernel_workspace
           
-          # 使用镜像源克隆
-          git clone https://ghproxy.com/https://github.com/LineageOS/android_kernel_xiaomi_sm7475.git -b ${{ inputs.CPU }} --depth=1
-          mv android_kernel_xiaomi_sm7475 Xiaomi_Kernel_OpenSource
+          # 使用直接下载链接（绕过Git）
+          curl -LO https://github.com/LineageOS/android_kernel_xiaomi_sm7475/archive/refs/heads/${{ inputs.CPU }}.zip
+          unzip ${{ inputs.CPU }}.zip
+          mv android_kernel_xiaomi_sm7475-${{ inputs.CPU }} Xiaomi_Kernel_OpenSource
           
           cd Xiaomi_Kernel_OpenSource
           sed -i 's/ -dirty//g' scripts/setlocalversion
 
       - name: Set up susfs
-        if: ${{ inputs.SUSFS_ENABLED == 'true' }}
         run: |
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
           
-          # 使用镜像源下载 sufs
-          curl -L https://ghproxy.com/https://gitlab.com/simonpunk/susfs4ksu/-/raw/android12-5.10/bin/arm64/sufs -o sufs_binary
+          # 创建sufs目录
           mkdir -p fs/sufs
-          mv sufs_binary fs/sufs/sufs
+          
+          # 下载预编译的sufs
+          curl -L https://cdn.jsdelivr.net/gh/tiann/sufs@main/bin/arm64/sufs -o fs/sufs/sufs
           chmod +x fs/sufs/sufs
-          touch fs/sufs/Kconfig
+          
+          # 创建必要的Kconfig文件
+          echo "config SUSFS" > fs/sufs/Kconfig
+          echo "    bool \"SUSFS support\"" >> fs/sufs/Kconfig
 
       - name: Fix Kconfig references
         run: |
@@ -59,26 +61,27 @@ jobs:
       - name: Build kernel
         run: |
           cd kernel_workspace/Xiaomi_Kernel_OpenSource
-          # 使用更兼容的配置文件
           make O=out ARCH=arm64 marble_defconfig
           make -j$(nproc) O=out ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu-
 
       - name: Make AnyKernel3
         run: |
           cd kernel_workspace
-          # 使用镜像源克隆 AnyKernel3
-          git clone https://ghproxy.com/https://github.com/Kernel-SU/AnyKernel3 --depth=1
-          rm -rf ./AnyKernel3/.git
+          
+          # 下载AnyKernel3
+          curl -LO https://github.com/Kernel-SU/AnyKernel3/archive/refs/heads/master.zip
+          unzip master.zip
+          mv AnyKernel3-master AnyKernel3
           
           # 复制内核镜像
           cp Xiaomi_Kernel_OpenSource/out/arch/arm64/boot/Image ./AnyKernel3/
           
-          # 添加 sufs 到 ramdisk
+          # 添加sufs
           mkdir -p ./AnyKernel3/ramdisk/sbin
           cp Xiaomi_Kernel_OpenSource/fs/sufs/sufs ./AnyKernel3/ramdisk/sbin/
           chmod 755 ./AnyKernel3/ramdisk/sbin/sufs
           
-          # 创建启动脚本
+          # 启动脚本
           cat << EOF > ./AnyKernel3/ramdisk/init.sufs.rc
           service sufs-daemon /sbin/sufs --mount
               class main
@@ -88,16 +91,20 @@ jobs:
           EOF
           echo 'import /init.sufs.rc' >> ./AnyKernel3/ramdisk/init.rc
           
-          # 添加权限设置
+          # 权限设置
           echo 'set_perm_recursive 0 0 0755 0755 "/sbin";' >> ./AnyKernel3/anykernel.sh
           echo 'set_perm 0 0 0755 "/sbin/sufs";' >> ./AnyKernel3/anykernel.sh
           
           # 添加设备兼容性
           sed -i '/device\.name1=/a device.name1=marble' ./AnyKernel3/anykernel.sh
           sed -i '/device\.name2=/a device.name2=marblein' ./AnyKernel3/anykernel.sh
+          
+          # 打包
+          cd AnyKernel3
+          zip -r9 ../AnyKernel3_SUSFS_marble_android13.zip .
 
       - name: Upload AnyKernel3
         uses: actions/upload-artifact@v4
         with:
           name: AnyKernel3_SUSFS_marble_android13
-          path: ./kernel_workspace/AnyKernel3/*
+          path: ./kernel_workspace/AnyKernel3_SUSFS_marble_android13.zip
